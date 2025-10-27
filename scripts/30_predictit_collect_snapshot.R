@@ -1,5 +1,7 @@
 suppressPackageStartupMessages({
-  library(httr); library(jsonlite); library(yaml)
+  library(httr); library(jsonlite); library(dplyr); library(purrr)
+  library(readr); library(stringr); library(tidyr); library(lubridate)
+  library(yaml); library(arrow)
 })
 
 source("R/config.R")
@@ -9,6 +11,9 @@ api_url <- cfg$predictit$api_all
 ua      <- cfg$global$user_agent %||% "pm-study/1.0"
 sleep_s <- as.numeric(cfg$global$sleep_seconds_between_requests %||% 0.5)
 retries <- as.integer(cfg$global$retries %||% 3)
+
+root_dir <- file.path("data", "snapshots", "predictit")
+dir.create(root_dir, recursive = TRUE, showWarnings = FALSE)
 
 resp <- httr::RETRY(
   "GET", api_url,
@@ -20,7 +25,7 @@ resp <- httr::RETRY(
 )
 httr::stop_for_status(resp)
 txt <- httr::content(resp, as = "text", encoding = "UTF-8")
-if (grepl("^\\s*<", txt)) stop("HTML statt JSON erhalten (Block/Rate-Limit).")
+if (grepl("^\\s*<", txt)) stop("HTML statt JSON (Rate-Limit/Block).")
 
 j <- jsonlite::fromJSON(txt, simplifyVector = FALSE)
 
@@ -33,15 +38,15 @@ markets_raw <- get_first_nonnull(
 )
 if (is.null(markets_raw)) stop("'markets' nicht gefunden.")
 
-# in data.frame ohne dplyr/arrow umwandeln
+markets_list <- if (!is.null(markets_raw$MarketData) && is.list(markets_raw$MarketData)) markets_raw$MarketData else markets_raw
+
 as_market_row <- function(m) {
   m_volume <- m$Volume %||% m$TotalSharesTraded %||% m$totalSharesTraded %||% m$TotalVolume %||% m$totalVolume %||% NA
-  data.frame(
+  tibble(
     market_id     = suppressWarnings(as.integer(m$ID %||% m$id)),
     market_name   = as.character(m$Name %||% m$name %||% NA_character_),
     market_url    = as.character(m$URL %||% m$url %||% NA_character_),
-    market_volume = suppressWarnings(as.numeric(m_volume)),
-    stringsAsFactors = FALSE
+    market_volume = suppressWarnings(as.numeric(m_volume))
   )
 }
 
@@ -50,9 +55,9 @@ extract_contracts <- function(m, market_id) {
   if (is.null(cc)) return(NULL)
   cc <- cc$ContractData %||% cc
   if (!is.list(cc)) return(NULL)
-  do.call(rbind, lapply(cc, function(x) {
+  map_dfr(cc, function(x) {
     c_volume <- x$Volume %||% x$TradeVolume %||% x$TotalSharesTraded %||% x$totalVolume %||% NA
-    data.frame(
+    tibble(
       market_id          = market_id,
       contract_id        = suppressWarnings(as.integer(x$ID %||% x$id)),
       contract_name      = as.character(x$Name %||% x$name %||% NA_character_),
@@ -62,58 +67,37 @@ extract_contracts <- function(m, market_id) {
       best_sell_yes_cost = suppressWarnings(as.numeric(x$BestSellYesCost %||% x$bestSellYesCost)),
       best_sell_no_cost  = suppressWarnings(as.numeric(x$BestSellNoCost %||% x$bestSellNoCost)),
       status             = as.character(x$Status %||% x$status %||% NA_character_),
-      contract_volume    = suppressWarnings(as.numeric(c_volume)),
-      stringsAsFactors = FALSE
+      contract_volume    = suppressWarnings(as.numeric(c_volume))
     )
-  }))
+  })
 }
 
-# markets_list herstellen
-markets_list <- if (!is.null(markets_raw$MarketData) && is.list(markets_raw$MarketData)) markets_raw$MarketData else markets_raw
-
-# data.frames bauen
-mk <- do.call(rbind, lapply(markets_list, as_market_row))
-ct <- do.call(rbind, lapply(seq_along(markets_list), function(i) {
-  mid <- suppressWarnings(as.integer(mk$market_id[i]))
+markets_df   <- purrr::map_dfr(markets_list, as_market_row)
+contracts_df <- purrr::map_dfr(seq_along(markets_list), function(i) {
+  mid <- suppressWarnings(as.integer(markets_df$market_id[i]))
   extract_contracts(markets_list[[i]], market_id = mid)
-}))
+})
 
-# Snapshot-TS (UTC) und join (nur mit Base-R)
-snap_ts   <- as.POSIXct(Sys.time(), tz = "UTC")
+snap_ts   <- with_tz(Sys.time(), tzone = "UTC")
 snap_date <- format(snap_ts, "%Y-%m-%d")
 snap_time <- format(snap_ts, "%H%M%S")
 
-# merge für market_name + market_volume an contracts
-ct <- merge(ct, mk[, c("market_id","market_name","market_volume")], by = "market_id", all.x = TRUE)
+ts_df <- contracts_df %>%
+  left_join(select(markets_df, market_id, market_volume), by = "market_id") %>%
+  mutate(
+    snapshot_ts = as_datetime(snap_ts),
+    prob_last   = ifelse(!is.na(last_trade_price) & last_trade_price > 1 & last_trade_price <= 100,
+                         last_trade_price/100, last_trade_price)
+  ) %>%
+  left_join(select(markets_df, market_id, market_name), by = "market_id") %>%
+  select(snapshot_ts, market_id, market_name, contract_id, contract_name,
+         prob_last,
+         best_buy_yes_cost, best_buy_no_cost, best_sell_yes_cost, best_sell_no_cost,
+         status, contract_volume, market_volume)
 
-# prob_last normalisieren
-prob_last <- ifelse(!is.na(ct$last_trade_price) & ct$last_trade_price > 1 & ct$last_trade_price <= 100,
-                    ct$last_trade_price/100, ct$last_trade_price)
+day_dir <- file.path(root_dir, paste0("date=", snap_date))
+dir.create(day_dir, showWarnings = FALSE, recursive = TRUE)
+outfile <- file.path(day_dir, paste0("predictit_", snap_date, "_", snap_time, ".parquet"))
 
-out <- data.frame(
-  snapshot_ts = rep(format(snap_ts, "%Y-%m-%d %H:%M:%S", tz = "UTC"), nrow(ct)),
-  market_id   = ct$market_id,
-  market_name = ct$market_name,
-  contract_id = ct$contract_id,
-  contract_name = ct$contract_name,
-  prob_last = prob_last,
-  best_buy_yes_cost  = ct$best_buy_yes_cost,
-  best_buy_no_cost   = ct$best_buy_no_cost,
-  best_sell_yes_cost = ct$best_sell_yes_cost,
-  best_sell_no_cost  = ct$best_sell_no_cost,
-  status = ct$status,
-  contract_volume = ct$contract_volume,
-  market_volume   = ct$market_volume,
-  stringsAsFactors = FALSE
-)
-
-# speichern (CSV.gz)
-day_dir <- file.path("data","snapshots","predictit", paste0("date=", snap_date))
-if (!dir.exists(day_dir)) dir.create(day_dir, recursive = TRUE)
-
-outfile <- file.path(day_dir, paste0("predictit_", snap_date, "_", snap_time, ".csv.gz"))
-con <- gzfile(outfile, "wt")
-write.csv(out, con, row.names = FALSE, fileEncoding = "UTF-8")
-close(con)
-
-message("Snapshot gespeichert: ", outfile, " (", nrow(out), " Zeilen)")
+arrow::write_parquet(ts_df, outfile, compression = cfg$global$parquet_compression %||% "zstd")
+message("Snapshot gespeichert: ", outfile, " (", nrow(ts_df), " Zeilen)")
