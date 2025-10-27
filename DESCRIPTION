@@ -1,0 +1,16 @@
+Type: project
+Package: predictit.collector
+Version: 0.0.1
+Depends: R (>= 4.1)
+Imports:
+    httr,
+    jsonlite,
+    dplyr,
+    purrr,
+    readr,
+    stringr,
+    tidyr,
+    lubridate,
+    yaml,
+    arrow
+Encoding: UTF-8
