@@ -2,24 +2,34 @@ name: Collect PredictIt Snapshots
 
 on:
   schedule:
-    - cron: "*/15 * * * *"   # alle 15 Minuten (UTC)
-  workflow_dispatch: {}
+    - cron: "*/15 * * * *"    # alle 15 Minuten (UTC)
+  workflow_dispatch: {}        # manuell startbar
+
+concurrency:
+  group: predictit-collector
+  cancel-in-progress: true     # kein Stau, neueste Ausführung gewinnt
 
 jobs:
   collect:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 5         # keine Hänger
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Setup R
         uses: r-lib/actions/setup-r@v2
         with:
-          r-version: '4.3.3'   # feste Version -> Cache bleibt stabil
+          use-public-rspm: true  # schnelle Binärpakete
 
-      # renv: nutzt renv.lock + Cache -> keine Neuinstallation jedes Mal
-      - name: Setup renv
-        uses: r-lib/actions/setup-renv@v2
+      # >>> Hier passiert die Magie: Pakete aus DESCRIPTION werden gecached <<<
+      - name: Restore R deps (pak cache)
+        uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          cache-version: 2        # eigenen Cache-Namespace erzwingen
+          working-directory: .    # Wurzel mit DESCRIPTION
+          # Wenn du Zusatzpakete willst, hier (werden auch gecached):
+          # extra-packages: any::arrow
 
       - name: Run collector
         run: Rscript scripts/30_predictit_collect_snapshot.R
