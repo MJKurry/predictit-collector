@@ -17,11 +17,10 @@ load_config <- function() {
   loc  <- load_yaml("config/config.local.yml")
   cfg  <- list_deep_merge(base, loc)
 
-  cfg$global$tz  <- cfg$global$tz  %||% "UTC"
+  cfg$global$tz <- cfg$global$tz %||% "UTC"
   Sys.setenv(TZ = cfg$global$tz)
 
   cfg$predictit$api_all <- cfg$predictit$api_all %||% "https://www.predictit.org/api/marketdata/all/"
-
   dir.create("data/snapshots/predictit", recursive = TRUE, showWarnings = FALSE)
   cfg
 }
