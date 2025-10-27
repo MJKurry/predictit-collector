@@ -1,0 +1,40 @@
+name: Collect PredictIt Snapshots
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"   # alle 15 Minuten (UTC)
+  workflow_dispatch: {}       # manuell startbar
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup R
+        uses: r-lib/actions/setup-r@v2
+
+      - name: Setup R dependencies
+        uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          packages: |
+            any::yaml
+            any::httr
+            any::jsonlite
+            any::readr
+            any::dplyr
+            any::purrr
+            any::stringr
+            any::tidyr
+            any::lubridate
+            any::arrow
+
+      - name: Run collector
+        run: Rscript scripts/30_predictit_collect_snapshot.R
+
+      - name: Upload snapshot artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: predictit_snapshots_${{ github.run_number }}
+          path: data/snapshots/predictit
