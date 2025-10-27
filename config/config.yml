@@ -3,6 +3,7 @@ global:
   user_agent: "pm-study/1.0"
   retries: 3
   sleep_seconds_between_requests: 0.5
+  parquet_compression: "zstd"
 
 predictit:
   api_all: "https://www.predictit.org/api/marketdata/all/"
