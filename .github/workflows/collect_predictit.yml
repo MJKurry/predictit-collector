@@ -2,7 +2,7 @@ name: Collect PredictIt Snapshots
 
 on:
   schedule:
-    - cron: "*/15 * * * *"    # alle 15 Minuten (UTC)
+   # - cron: "*/15 * * * *"    # alle 15 Minuten (UTC)
   workflow_dispatch: {}        # manuell startbar
 
 concurrency:
